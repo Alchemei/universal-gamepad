@@ -2,11 +2,16 @@
 Multi-Controller Manager
 Coordinates up to 2 gamepads (any type) using pygame + optional pydualsense.
 """
-import gc, threading, time
+import gc, threading, time, ctypes
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 from gamepad import GamepadReader, GamepadState, scan_gamepads, create_reader, init_pygame
 import pygame
+
+# Windows Mouse Constants
+MOUSEEVENTF_MOVE = 0x0001
+def move_mouse(dx, dy):
+    ctypes.windll.user32.mouse_event(MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
 
 try:
     import vgamepad as vg
@@ -18,6 +23,12 @@ try:
 except ImportError:
     HAS_VGAMEPAD = False
     vc = None
+
+try:
+    from pydualsense import pydualsense
+    HAS_PYDUALSENSE = True
+except ImportError:
+    HAS_PYDUALSENSE = False
 
 MAX_CONTROLLERS = 2
 
@@ -57,10 +68,41 @@ class ControllerSlot:
         self._ds = None
         self._is_dualsense = False
         self._last_vibration = (0, 0) # (large, small)
+        self._last_touch = None
+        self._mouse_sensitivity = 0.15
+        self._mouse_filter_x = 0
+        self._mouse_filter_y = 0
+        self._led_color = (0, 114, 206) # Default PlayStation Blue
+
+        # Detection & Initialization for DualSense Haptics
+        name_lower = self.reader.name.lower()
+        if "dualsense" in name_lower or "ps5" in name_lower or "wireless controller" in name_lower:
+            self._is_dualsense = True
+            if HAS_PYDUALSENSE:
+                try:
+                    # We try to initialize pydualsense for this slot to handle haptic feedback.
+                    # If it fails (e.g. handle busy), we fall back to generic pygame rumble.
+                    self._ds = pydualsense()
+                    self._ds.init()
+                    # Apply initial LED color
+                    self._ds.light.TouchpadColor = self._led_color
+                    print(f"[INFO] DualSense haptics driver linked for: {self.reader.name}")
+                except Exception as e:
+                    print(f"[DEBUG] DualSense haptics init skipped: {e}")
+                    self._ds = None
 
     @property
     def name(self):
         return self.reader.name
+
+    def set_led_color(self, r, g, b):
+        """Sets the LED color of the DualSense controller."""
+        self._led_color = (r, g, b)
+        if self._ds:
+            try:
+                self._ds.light.TouchpadColor = (r, g, b)
+            except Exception as e:
+                print(f"[DEBUG] Failed to set LED color: {e}")
 
     def set_emulation(self, mode: int):
         self.emulation_mode = mode
@@ -85,6 +127,52 @@ class ControllerSlot:
 
     def update_virtual(self):
         s = self.state
+        
+        # DualSense specific: sync touchpad/ps state from pydualsense if available
+        # because SDL (reader.poll) often misses them or uses different button IDs.
+        if self._ds:
+            try:
+                s.touchpad = bool(self._ds.state.touchBtn)
+                s.ps_button = bool(self._ds.state.ps)
+                
+                # --- Touchpad Mouse Emulation ---
+                t0 = self._ds.state.trackPadTouch0
+                if t0.isActive:
+                    curr_x, curr_y = t0.X, t0.Y
+                    if self._last_touch:
+                        dx = (curr_x - self._last_touch[0])
+                        dy = (curr_y - self._last_touch[1])
+                        
+                        # Non-linear acceleration: Mag^1.2
+                        mag = (dx*dx + dy*dy)**0.5
+                        if mag > 0:
+                            # Small movements are slowed, fast movements are boosted
+                            accel_scale = (mag ** 0.15) * self._mouse_sensitivity
+                            dx *= accel_scale
+                            dy *= accel_scale
+                        
+                        # Limit movement per frame
+                        dx = max(-35, min(35, dx))
+                        dy = max(-35, min(35, dy))
+                        
+                        # Exponential Moving Average (EMA) for Smoothing
+                        # 60% new value, 40% old value
+                        self._mouse_filter_x = self._mouse_filter_x * 0.4 + dx * 0.6
+                        self._mouse_filter_y = self._mouse_filter_y * 0.4 + dy * 0.6
+                        
+                        if abs(self._mouse_filter_x) > 0.1 or abs(self._mouse_filter_y) > 0.1:
+                            move_mouse(self._mouse_filter_x, self._mouse_filter_y)
+                            
+                    self._last_touch = (curr_x, curr_y)
+                    s.touchpad = True
+                else:
+                    self._last_touch = None
+                    self._mouse_filter_x = 0
+                    self._mouse_filter_y = 0
+                # --------------------------------
+            except Exception:
+                pass
+
         if self.emulation_mode == 2 and self._xbox:
             self._map_xbox(s)
         elif self.emulation_mode == 1 and self._vpad:
@@ -114,6 +202,10 @@ class ControllerSlot:
         x.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT) if s.dpad_right else x.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
         x.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_START) if s.options else x.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_START)
         x.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK) if s.create else x.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK)
+        
+        # Guide/PS Button
+        x.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE) if s.ps_button else x.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE)
+        
         x.update()
 
     def _map_ds4(self, s):
@@ -148,17 +240,56 @@ class ControllerSlot:
         v.directional_pad(direction=dp)
         v.press_button(vg.DS4_BUTTONS.DS4_BUTTON_OPTIONS) if s.options else v.release_button(vg.DS4_BUTTONS.DS4_BUTTON_OPTIONS)
         v.press_button(vg.DS4_BUTTONS.DS4_BUTTON_SHARE) if s.create else v.release_button(vg.DS4_BUTTONS.DS4_BUTTON_SHARE)
+        
+        # PS and Touchpad (Special buttons in vgamepad)
+        v.press_special_button(vg.DS4_SPECIAL_BUTTONS.DS4_SPECIAL_BUTTON_PS) if s.ps_button else v.release_special_button(vg.DS4_SPECIAL_BUTTONS.DS4_SPECIAL_BUTTON_PS)
+        v.press_special_button(vg.DS4_SPECIAL_BUTTONS.DS4_SPECIAL_BUTTON_TOUCHPAD) if s.touchpad else v.release_special_button(vg.DS4_SPECIAL_BUTTONS.DS4_SPECIAL_BUTTON_TOUCHPAD)
+        
         v.update()
-
     def _vibration_callback(self, client, target, large_motor, small_motor, led_number, user_data):
         """Called by ViGEmBus when the game sends vibration data."""
-        # Convert 0..255 to 0.0..1.0
+        # Convert 0..255 to 0.0..1.0 for generic, and 0..255 for DualSense
         low = large_motor / 255.0
         high = small_motor / 255.0
         
         # Apply to physical controller
-        self.reader.rumble(low, high, 1000)
+        if self._ds:
+            try:
+                # pydualsense uses 0-255 range for motors
+                self._ds.setLeftMotor(large_motor)
+                self._ds.setRightMotor(small_motor)
+            except Exception as e:
+                print(f"[DEBUG] DualSense motor error: {e}")
+                # Fallback to pygame rumble if pydualsense fails
+                self.reader.rumble(low, high, 1000)
+        else:
+            self.reader.rumble(low, high, 1000)
+            
         self._last_vibration = (low, high)
+
+    def rumble(self, low: float, high: float, duration_ms: int):
+        """Unified rumble method for both DualSense and standard controllers."""
+        if self._ds:
+            try:
+                # Convert 0.0-1.0 to 0-255
+                self._ds.setLeftMotor(int(low * 255))
+                self._ds.setRightMotor(int(high * 255))
+                
+                # Start a timer to stop motors after duration_ms
+                def stop():
+                    time.sleep(duration_ms / 1000.0)
+                    if self._ds:
+                        try:
+                            self._ds.setLeftMotor(0)
+                            self._ds.setRightMotor(0)
+                        except: pass
+                threading.Thread(target=stop, daemon=True).start()
+                return
+            except Exception as e:
+                print(f"[DEBUG] DualSense test rumble error: {e}")
+        
+        # Fallback to generic pygame rumble
+        self.reader.rumble(low, high, duration_ms)
 
     def _destroy_virtual(self):
         for dev in (self._vpad, self._xbox):
@@ -169,6 +300,12 @@ class ControllerSlot:
 
     def destroy(self):
         self._destroy_virtual()
+        if self._ds:
+            try:
+                self._ds.close()
+            except:
+                pass
+            self._ds = None
         self.state.connected = False
 
 
@@ -276,7 +413,7 @@ class MultiControllerManager:
         """Triggers a short vibration test on the specified controller slot."""
         if 0 <= slot_idx < len(self.slots):
             print(f"[DEBUG] Titresim testi baslatiliyor: Slot {slot_idx}")
-            self.slots[slot_idx].reader.rumble(1.0, 1.0, 1000)
+            self.slots[slot_idx].rumble(1.0, 1.0, 1000)
 
     def _poll_loop(self):
         while self._running:

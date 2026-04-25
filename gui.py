@@ -5,6 +5,7 @@ Professional CustomTkinter interface with PlayStation button labels and multi-co
 
 import customtkinter as ctk
 import tkinter as tk
+from tkinter import colorchooser
 import json
 import os
 import sys
@@ -95,6 +96,8 @@ TRANSLATIONS = {
         "last_pressed": "SON BASILANLAR",
         "start_pressing": "Bir butona basarak başlayın...",
         "direct": "Direkt",
+        "led_color": "LED Rengi",
+        "led_desc": "DualSense ışık çubuğunun rengini değiştirin.",
     },
     "en": {
         "title": "Universal Gamepad",
@@ -134,6 +137,8 @@ TRANSLATIONS = {
         "last_pressed": "LAST PRESSED",
         "start_pressing": "Press a button to start...",
         "direct": "Direct",
+        "led_color": "LED Color",
+        "led_desc": "Change the DualSense lightbar color.",
     }
 }
 
@@ -181,6 +186,7 @@ class DualSenseGUI(ctk.CTk):
         self._lang = "en"
         self._show_warning_panel = True
         self._in_settings = False
+        self._led_color = "#0072CE" # Default PS Blue
         self._load_settings()
 
         # Build UI
@@ -461,6 +467,10 @@ class DualSenseGUI(ctk.CTk):
                 self._lang = data.get("lang", "en")
                 self._show_warning_panel = data.get("show_warning", True)
                 self._selected_mode = data.get("preferred_mode", "Xbox")
+                self._led_color = data.get("led_color", "#0072CE")
+                
+                # Apply to manager
+                self._apply_led_color()
         except Exception:
             pass
 
@@ -469,12 +479,47 @@ class DualSenseGUI(ctk.CTk):
             data = {
                 "preferred_mode": self._selected_mode,
                 "lang": self._lang,
-                "show_warning": self._show_warning_panel
+                "show_warning": self._show_warning_panel,
+                "led_color": self._led_color
             }
             with open(self.SETTINGS_PATH, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def _is_color_light(self, hex_color):
+        """Returns True if the color is light (for text contrast)."""
+        try:
+            hex_c = hex_color.lstrip('#')
+            r, g, b = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
+            # Perceptual brightness formula
+            brightness = (r * 299 + g * 587 + b * 114) / 1000
+            return brightness > 128
+        except: return False
+
+    def _apply_led_color(self):
+        """Converts the stored hex color to RGB and applies it to all controller slots."""
+        try:
+            hex_c = self._led_color.lstrip('#')
+            r, g, b = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
+            for slot in self.manager.slots:
+                slot.set_led_color(r, g, b)
+        except Exception as e:
+            print(f"[DEBUG] Error applying LED color: {e}")
+
+    def _open_color_picker(self):
+        """Opens the system color picker dialog."""
+        color = colorchooser.askcolor(initialcolor=self._led_color, title=self._t("led_color"))
+        if color[1]:
+            self._on_led_color_change(color[1])
+
+    def _on_led_color_change(self, color_hex):
+        """Handler for LED color selection."""
+        self._led_color = color_hex
+        self._save_settings()
+        self._apply_led_color()
+        # Refresh the view to update sliders and indicators
+        self._build_main_content()
 
     def _build_settings_view(self):
         # Header for settings
@@ -512,6 +557,40 @@ class DualSenseGUI(ctk.CTk):
             command=lambda: self._on_lang_change("en")
         )
         btn_en.pack(side="left", padx=10, pady=10)
+
+        # LED Color Section
+        led_frame = self._build_settings_card(content_scroll, self._t("led_color"), "🌈")
+        ctk.CTkLabel(led_frame, text=self._t("led_desc"), font=ctk.CTkFont(family="Inter", size=11), text_color=Colors.TEXT_DIM).pack(padx=10, anchor="w")
+        
+        main_led_row = ctk.CTkFrame(led_frame, fg_color="transparent")
+        main_led_row.pack(fill="x", padx=10, pady=15)
+
+        # Left: Presets
+        presets_frame = ctk.CTkFrame(main_led_row, fg_color="transparent")
+        presets_frame.pack(side="left")
+        
+        presets = [("#0072CE", "B"), ("#FF3333", "R"), ("#33FF33", "G"), ("#FF33FF", "P"), ("#FFFFFF", "W")]
+        for hex_code, _ in presets:
+            btn = ctk.CTkButton(
+                presets_frame, text="", fg_color=hex_code, hover_color=hex_code, 
+                width=30, height=30, corner_radius=15, 
+                border_width=2 if self._led_color.lower() == hex_code.lower() else 0,
+                border_color=Colors.TEXT_PRIMARY,
+                command=lambda h=hex_code: self._on_led_color_change(h)
+            )
+            btn.pack(side="left", padx=4)
+
+        # Right: Custom Picker Button
+        ctk.CTkLabel(main_led_row, text="  |  ", text_color=Colors.BORDER).pack(side="left")
+        
+        custom_btn = ctk.CTkButton(
+            main_led_row, text="🎨 " + ("Custom" if self._lang == "en" else "Özel Renk"), 
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=self._led_color, text_color="#000000" if self._is_color_light(self._led_color) else "#FFFFFF",
+            hover_color=Colors.PS_BLUE, corner_radius=8, height=36, width=140,
+            command=self._open_color_picker
+        )
+        custom_btn.pack(side="left", padx=10)
 
         # Driver Management
         driver_frame = self._build_settings_card(content_scroll, self._t("driver_reset"), "🛠️")
@@ -683,35 +762,64 @@ class DualSenseGUI(ctk.CTk):
 
         self._create_button_indicator(parent, "🎤 Mute", idx, key_override="mute").pack(fill="x", pady=(0, 6))
 
-        # Settings
+        # Settings Card
         sc = ctk.CTkFrame(parent, fg_color=Colors.BG_CARD, corner_radius=10, border_width=1, border_color=Colors.BORDER)
         sc.pack(fill="x", pady=(0, 6), expand=True)
         ctk.CTkLabel(sc, text=self._t("settings").upper(), font=ctk.CTkFont(size=9, weight="bold"), text_color=Colors.TEXT_DIM).pack(padx=12, pady=(10, 6), anchor="w")
 
-        emu_frame = ctk.CTkFrame(sc, fg_color="transparent")
-        emu_frame.pack(fill="x", padx=12, pady=(0, 4))
-        ctk.CTkLabel(emu_frame, text=self._t("controller_mode"), font=ctk.CTkFont(size=11), text_color=Colors.TEXT_SECONDARY).pack(side="left")
-
-        # Force exactly 3 unique values
-        mode_options = [self._t("direct"), "PS4", "Xbox"]
+        # 1. Mode Selection
         emu_sel = ctk.CTkSegmentedButton(
-            sc, values=mode_options, 
+            sc, values=[self._t("direct"), "PS4", "Xbox"], 
             command=lambda v, s=idx: self._on_emulation_change(s, v),
             selected_color=Colors.PS_BLUE_DARK, selected_hover_color=Colors.PS_BLUE,
             unselected_color=Colors.BG_INPUT, unselected_hover_color=Colors.BG_CARD_HOVER
         )
         emu_sel.pack(fill="x", padx=12, pady=(4, 8))
-        
-        # map slot emulation to label
         reverse_modes = {0: self._t("direct"), 1: "PS4", 2: "Xbox"}
         emu_sel.set(reverse_modes.get(slot.emulation_mode, self._t("direct")))
 
-        # Swap Triggers Checkbox
+        # 2. Real-time LED Control
+        ctk.CTkLabel(sc, text=self._t("led_color").upper(), font=ctk.CTkFont(size=9, weight="bold"), text_color=Colors.TEXT_DIM).pack(padx=12, pady=(4, 2), anchor="w")
+        led_row = ctk.CTkFrame(sc, fg_color="transparent")
+        led_row.pack(fill="x", padx=8, pady=(0, 8))
+
+        hex_c = self._led_color.lstrip('#')
+        cr, cg, cb = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
+
+        def _update_led(_):
+            r, g, b = int(sr.get()), int(sg.get()), int(sb.get())
+            nh = f"#{r:02x}{g:02x}{b:02x}"; self._led_color = nh
+            self._apply_led_color(); preview.configure(fg_color=nh)
+
+        sliders = ctk.CTkFrame(led_row, fg_color="transparent")
+        sliders.pack(side="left", fill="x", expand=True)
+        sr = ctk.CTkSlider(sliders, from_=0, to=255, height=14, command=_update_led, button_color="#FF4444"); sr.pack(fill="x", pady=1); sr.set(cr)
+        sg = ctk.CTkSlider(sliders, from_=0, to=255, height=14, command=_update_led, button_color="#44FF44"); sg.pack(fill="x", pady=1); sg.set(cg)
+        sb = ctk.CTkSlider(sliders, from_=0, to=255, height=14, command=_update_led, button_color="#4444FF"); sb.pack(fill="x", pady=1); sb.set(cb)
+        sr.bind("<ButtonRelease-1>", lambda e: self._save_settings())
+        sg.bind("<ButtonRelease-1>", lambda e: self._save_settings())
+        sb.bind("<ButtonRelease-1>", lambda e: self._save_settings())
+
+        # Preview Button: Clicking this opens the full color picker
+        preview = ctk.CTkButton(
+            led_row, text="", width=30, height=46, fg_color=self._led_color, 
+            hover_color=self._led_color, corner_radius=6, border_width=1, 
+            border_color=Colors.BORDER, command=self._open_color_picker
+        )
+        preview.pack(side="right", padx=(10, 5))
+
+        # 3. Vibration Test
+        vib_btn = ctk.CTkButton(
+            sc, text="📳 " + self._t("vibration_test"), font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=Colors.BG_INPUT, hover_color=Colors.BG_CARD_HOVER, border_width=1, border_color=Colors.BORDER,
+            corner_radius=8, height=32, command=lambda s=idx: self.manager.test_rumble(s)
+        )
+        vib_btn.pack(fill="x", padx=12, pady=(0, 8))
+
+        # 4. Swap Triggers
         swap_cb = ctk.CTkCheckBox(
-            sc, text=self._t("swap_triggers"), 
-            font=ctk.CTkFont(size=11),
-            text_color=Colors.TEXT_SECONDARY,
-            fg_color=Colors.PS_BLUE,
+            sc, text=self._t("swap_triggers"), font=ctk.CTkFont(size=11),
+            text_color=Colors.TEXT_SECONDARY, fg_color=Colors.PS_BLUE,
             command=lambda s=idx: self._on_swap_triggers_change(s)
         )
         swap_cb.pack(fill="x", padx=12, pady=(0, 10))
@@ -886,6 +994,7 @@ class DualSenseGUI(ctk.CTk):
     def _handle_connect_result(self, success, msg, auto: bool = False):
         self._connect_in_progress = False
         if success:
+            self._apply_led_color()
             self._build_multi_controller_view()
             return
 
