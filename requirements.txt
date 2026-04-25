@@ -1,0 +1,5 @@
+pydualsense>=0.7.0
+vgamepad>=0.3.2
+customtkinter>=5.2.0
+Pillow>=10.0.0
+pygame>=2.5.0
