@@ -8,6 +8,11 @@ A professional, high-performance gamepad management application designed for PC.
 
 ## ✨ Features
 
+<p align="center">
+  <img src="screenshot.png" width="45%" />
+  <img src="screenshot2.png" width="45%" />
+</p>
+
 - **Multi-Controller Support:** Connect and manage multiple controllers simultaneously.
 - **Advanced Emulation:** Seamlessly emulate controllers as Xbox 360 or PS4 devices using the ViGEmBus driver.
 - **Premium GUI:** Sleek, modern interface inspired by PlayStation aesthetics with glassmorphism and smooth animations.
